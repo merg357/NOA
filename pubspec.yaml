@@ -33,6 +33,15 @@ dependencies:
   flutter_foreground_task: ^6.5.0
   frame_msg: ^2.0.0
   frame_ble: ^3.0.0
+  image_picker: ^1.0.7
+  # record: phone microphone capture for the push-to-talk voice loop.
+  # AudioRecorder API (v5+) records to a local WAV file consumed by the STT provider.
+  record: ^6.0.0
+  # window_manager: desktop window geometry, always-on-top, borderless, kiosk.
+  # Only called on Windows (Platform.isWindows guard in window_service.dart).
+  window_manager: ^0.4.2
+  # web_socket_channel: persistent WebSocket for the Gemini Live real-time session.
+  web_socket_channel: ^3.0.0
 
 dev_dependencies:
   flutter_test:

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fixes Windows SDK discovery when registry KitsRoot10 points to wrong path -->
+<Project>
+  <PropertyGroup>
+    <WindowsSdkDir Condition="'$(WindowsSdkDir)'==''">C:\Program Files (x86)\Windows Kits\10\</WindowsSdkDir>
+    <WindowsSdkDir Condition="!Exists('$(WindowsSdkDir)Lib\10.0.19041.0\ucrt\x64\ucrtd.lib')">C:\Program Files (x86)\Windows Kits\10\</WindowsSdkDir>
+    <WindowsSDKVersion Condition="'$(WindowsSDKVersion)'==''">10.0.19041.0\</WindowsSDKVersion>
+    <UCRTContentRoot>C:\Program Files (x86)\Windows Kits\10\</UCRTContentRoot>
+  </PropertyGroup>
+</Project>

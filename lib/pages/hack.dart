@@ -93,7 +93,7 @@ class HackPage extends ConsumerWidget {
           ],
         ),
       ),
-      bottomNavigationBar: bottomNavBar(context, 2, true),
+      bottomNavigationBar: bottomNavBar(context, 4, true),
     );
   }
 }

@@ -4,6 +4,12 @@
 <dict>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>You can save images generated with Noa to your photos</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>ARIA uses your microphone for push-to-talk voice input to the assistant</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Noa uses your camera to capture images for visual analysis on your Frame device</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Noa reads photos you select for visual analysis on your Frame device</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

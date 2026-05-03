@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/material.dart';
 import 'package:noa/models/app_logic_model.dart' as app;
+import 'package:noa/pages/aria_settings.dart';
 import 'package:noa/style.dart';
 import 'package:noa/widgets/bottom_nav_bar.dart';
 import 'package:noa/widgets/top_title_bar.dart';
@@ -327,11 +328,37 @@ class TunePage extends ConsumerWidget {
               _inputBox(ref, 2),
               _inputBox(ref, 1),
               _checkBox(ref, 1),
+              const SizedBox(height: 12),
+              GestureDetector(
+                onTap: () => Navigator.push(
+                  context,
+                  PageRouteBuilder(
+                    pageBuilder: (_, __, ___) => const AriaSettingsPage(),
+                    transitionDuration: Duration.zero,
+                    reverseTransitionDuration: Duration.zero,
+                  ),
+                ),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                  decoration: BoxDecoration(
+                    color: colorLight,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('ARIA Settings', style: textStyleDark),
+                      const Icon(Icons.chevron_right, color: colorDark),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
             ],
           ),
         ),
       ),
-      bottomNavigationBar: bottomNavBar(context, 1, false),
+      bottomNavigationBar: bottomNavBar(context, 3, false),
     );
   }
 }

@@ -11,7 +11,9 @@ import 'package:frame_ble/brilliant_dfu_device.dart';
 import 'package:frame_ble/brilliant_scanned_device.dart';
 import 'package:frame_msg/frame_msg.dart';
 import 'package:logging/logging.dart';
-import 'package:noa/bluetooth.dart';
+import 'package:noa/models/app_mode.dart';
+import 'package:noa/models/assistant_result.dart';
+import 'package:noa/models/wearable_card.dart';
 import 'package:noa/noa_api.dart';
 import 'package:noa/util/tx_rich_text.dart';
 import 'package:noa/util/state_machine.dart';
@@ -107,6 +109,110 @@ class AppLogicModel extends ChangeNotifier {
   double scriptProgress = 0;
   String deviceName = "Device";
   List<NoaMessage> noaMessages = List.empty(growable: true);
+
+  // ── ARIA extensions ────────────────────────────────────────────────────────
+
+  /// Current assistant operating mode — synced from [appModeProvider] via the
+  /// UI layer.  Only used to append [AppMode.systemPromptSuffix] to the
+  /// prompt sent to the Noa API; persistence is handled by [AppModeNotifier].
+  AppMode _appMode = AppMode.standard;
+
+  /// Called by the UI (NoaPage) whenever [appModeProvider] changes.
+  void setAppMode(AppMode mode) {
+    _appMode = mode;
+    // No notifyListeners needed — mode only affects the next API call.
+  }
+
+  /// Read-only access to the current mode for services (e.g. VoiceAssistantService).
+  AppMode get currentAppMode => _appMode;
+
+  /// Most recently queued wearable card for the Frame display.
+  WearableCard? currentWearableCard;
+
+  /// Sends [card] to the connected Frame device (fire-and-forget).
+  Future<void> sendWearableCardToFrame(WearableCard card) async {
+    currentWearableCard = card;
+    notifyListeners();
+    if (_connectedDevice == null) return;
+    try {
+      final text = card.toFrameString();
+      await _connectedDevice!.sendMessage(
+        messageResponseFlag,
+        TxRichText(text: text, emoji: "\u{F0003}").pack(),
+      );
+    } catch (e) {
+      _log.warning("Failed to send wearable card: $e");
+    }
+  }
+
+  /// Handles a typed or voice-transcribed text command.
+  ///
+  /// If the [commandRouter] handles the command locally, the result is added to
+  /// [noaMessages] and returned.  Otherwise returns null so the caller can
+  /// send to the Noa AI backend via the normal Frame tap flow.
+  /// [sendCard] — pass `false` from the voice path so the card is sent only
+  /// once (step 10 of [VoiceAssistantService.stopAndProcess] owns that duty).
+  Future<AssistantResult?> processLocalCommand(
+      String text,
+      Future<AssistantResult?> Function(String) router, {
+      bool sendCard = true}) async {
+    final result = await router(text);
+    if (result == null) return null;
+
+    noaMessages.add(NoaMessage(
+      message: text,
+      from: NoaRole.user,
+      time: DateTime.now(),
+    ));
+    noaMessages.add(NoaMessage(
+      message: result.displayText,
+      from: NoaRole.noa,
+      time: DateTime.now(),
+    ));
+    // Only the text-input path sends the card here; the voice path handles
+    // card dispatch after building the final reply (avoids a double-send).
+    if (sendCard && result.wearableCard != null) {
+      await sendWearableCardToFrame(result.wearableCard!);
+    }
+    notifyListeners();
+    return result;
+  }
+
+  /// Adds a voice exchange (user transcript + assistant reply) to the on-screen
+  /// chat without going through the command router or Noa API.
+  ///
+  /// Called by [VoiceAssistantService] when no command router match is found
+  /// and the app falls back to a mode-aware mock reply.
+  void addVoiceExchangeToChat(String userText, String assistantReply) {
+    noaMessages.add(NoaMessage(
+      message: userText,
+      from: NoaRole.user,
+      time: DateTime.now(),
+    ));
+    noaMessages.add(NoaMessage(
+      message: assistantReply,
+      from: NoaRole.noa,
+      time: DateTime.now(),
+    ));
+    notifyListeners();
+  }
+
+  /// Sends a short status text to Frame (e.g. "Listening…", "Thinking…").
+  ///
+  /// Silently ignores calls when no device is connected.
+  Future<void> sendStatusBannerToFrame(String text) async {
+    if (_connectedDevice == null) return;
+    try {
+      await _connectedDevice!.sendMessage(
+        messageResponseFlag,
+        TxRichText(text: text, emoji: "\u{F0003}").pack(),
+      );
+    } catch (e) {
+      _log.warning('Failed to send status banner: $e');
+    }
+  }
+
+  // ── End ARIA extensions ───────────────────────────────────────────────────
 
   void setUserAuthToken(String token) {
     SharedPreferences.getInstance().then((value) async {
@@ -268,6 +374,13 @@ class AppLogicModel extends ChangeNotifier {
         prompt += "Limit responses to 2 paragraphs. ";
         break;
     }
+
+    // Append mode-specific behaviour suffix.
+    final modeSuffix = _appMode.systemPromptSuffix;
+    if (modeSuffix.isNotEmpty) {
+      prompt += modeSuffix.trim();
+    }
+
     return prompt;
   }
 
