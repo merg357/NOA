@@ -14,12 +14,107 @@ Welcome to the Noa app repository! Built using Flutter, this repository also ser
 
 | Tab | Page | Status |
 |-----|------|--------|
-| CHAT (0) | `NoaPage` | ✅ Live — voice via Frame tap + new text command input bar |
-| LENS (1) | `VisionPage` | ✅ Live — camera/gallery capture; pluggable `VisionAnalysisProvider` (default: `MockVisionProvider`) |
+| CHAT (0) | `NoaPage` | ✅ Live — voice via Frame tap + text command input bar + **Interpreter Panel** |
+| LENS (1) | `VisionPage` | ✅ Live — camera/gallery capture; pluggable `VisionAnalysisProvider` |
 | TASKS (2) | `ProductivityPage` | ✅ Live — reminders, notes, memory facts; SharedPreferences backed |
 | TUNE (3) | `TunePage` | ✅ Live — existing Noa settings + "ARIA Settings →" link |
-| TUNE → | `AriaSettingsPage` | ✅ Live — pushed from TUNE tab; persona editor, mode chips |
+| TUNE → | `AriaSettingsPage` | ✅ Live — persona, mode, Gemini Live, **Interpreter Mode**, **Earbud Mode**, VPS |
 | LOG (4) | `HackPage` | ✅ Live — BLE + app log viewer |
+
+---
+
+## Interpreter Mode
+
+Interpreter Mode turns the Gemini Live voice session into a real-time spoken language interpreter. It is a specialization of the existing Gemini Live path — no separate backend is needed.
+
+### How it works
+
+When Interpreter Mode is enabled, the Gemini Live session receives a strict system instruction that replaces the normal ARIA assistant persona. Gemini is told to:
+
+1. Detect or accept the source language.
+2. Translate naturally into the target language.
+3. Respond in a fixed parseable template:
+
+```
+SOURCE_LANGUAGE: Spanish
+ORIGINAL: ¿Cómo estás?
+TRANSLATION: How are you?
+PRONUNCIATION: 
+NOTE: Informal greeting
+```
+
+The Flutter app parses this template into an `InterpreterResult` object and displays it in the **Interpreter Panel** — a compact widget that appears between the voice banner and the input bar on the Chat screen.
+
+### Modes
+
+| Mode | Behaviour |
+|------|-----------|
+| **Any → English** | Speak in any language. Gemini auto-detects and translates to English. |
+| **English → Target** | Speak English. Gemini translates to the selected target language. |
+| **Bidirectional** | Speak either language. Gemini detects and translates in the opposite direction. |
+
+### Supported target languages
+
+Arabic, French, German, Hindi, Italian, Japanese, Korean, Mandarin, Portuguese, Russian, Spanish, Turkish.
+
+### Panel actions
+
+- **Swap** — toggle between Any→English and English→Target
+- **Copy** — copies the translation text to the clipboard
+- **Speak** — sends a re-speak request to the active Gemini Live session
+- **Clear** — clears the current result
+
+### How to enable
+
+1. Open **Settings → Interpreter Mode**.
+2. Toggle **Enable Interpreter Mode** ON.
+3. Select a direction and (if applicable) a target language.
+4. Ensure **Gemini Live** is also enabled (Settings → Gemini Live).
+5. Return to the **CHAT** tab and tap the mic button.
+
+### Frame integration
+
+Interpreter results produce compact wearable cards sent to Frame (if connected):
+```
+[source language] → EN
+[short translation]
+[pronunciation line]
+```
+Frame hardware is **not required** for interpreter mode to function.
+
+---
+
+## Earbud Mode
+
+Earbud Mode routes Android communication audio to a Bluetooth headset/earbuds when available.
+
+### How it works
+
+- A native Android `AudioRoutePlugin` (Kotlin) exposes a `MethodChannel` at `noa/audio_route`.
+- On Android API 31+ it calls `AudioManager.setCommunicationDevice()` to prefer the Bluetooth device.
+- On older Android or non-Android platforms, all operations are no-ops and the app falls back cleanly to the phone microphone/speaker.
+- The Flutter `AudioRouteService` wraps the channel with graceful error handling.
+
+### Testing with Bluetooth earbuds
+
+1. Pair your Bluetooth earbuds with the phone.
+2. Open **Settings → Earbud Mode** and enable **Enable Earbud Mode**.
+3. Tap **Refresh devices** — your earbuds should appear in the device list.
+4. The "Active route" row shows the selected device.
+5. Start a Gemini Live or Interpreter session — audio should route to the earbuds.
+
+### What still requires a real Android device
+
+- Actual Bluetooth audio routing (`AudioManager.setCommunicationDevice`) — this cannot be emulated on desktop or iOS.
+- The device list will be empty on non-Android platforms.
+
+### What still requires Brilliant Frame hardware
+
+- BLE pairing, tap-to-capture photo, BLE audio streaming.
+- Wearable card display on Frame.
+- Interpreter mode itself works without Frame hardware.
+
+---
 
 ### Text command routing (CHAT bar)
 
@@ -513,3 +608,74 @@ Sometimes it may be necessary to regenerate the platform files. To do this, dele
     ```
 
     1. Finally, you may want to find and replace all occurrences of the string `xyz.brilliant` to your own reverse-domain bundle identifier
+
+---
+
+## Jarvis VPS System
+
+This fork adds a **VPS-first always-on brain** layer to the app.
+
+### Architecture
+
+```
+┌──────────────────────────────┐      BLE
+│  Android / Flutter App        │◄─────────────► Brilliant Labs Frame
+│  (noa package)               │                (Lua HUD cards)
+│  • Gemini Live voice (primary)│
+│  • STT → assistant → TTS     │      WebSocket
+│  • VpsService (auto-connect)  │◄─────────────► Jarvis VPS (port 8765)
+└──────────────────────────────┘                  │
+                                                  ├─ FastAPI REST + WS
+                                                  ├─ Hermes agent (autonomy)
+                                                  ├─ Gemini ephemeral tokens
+                                                  └─ Card push → Frame
+```
+
+### VPS setup (Linux)
+
+```bash
+cd /root/jarvis
+cp .env.template .env
+# Fill in VPS_BEARER_TOKEN, GEMINI_API_KEY, etc.
+bash vps/install.sh          # creates venv, installs systemd service
+systemctl status jarvis-vps  # confirm running
+```
+
+### VPS environment variables (`.env`)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `VPS_BEARER_TOKEN` | _(empty = dev mode)_ | Secret shared with mobile app |
+| `VPS_HOST` | `0.0.0.0` | Bind address |
+| `VPS_PORT` | `8765` | Listen port |
+| `VPS_LOG_LEVEL` | `info` | uvicorn log level |
+| `GEMINI_API_KEY` | _(empty)_ | Google AI Studio key for Gemini Live ephemeral tokens |
+| `GEMINI_LIVE_MODEL` | `gemini-2.0-flash-live-001` | Model name |
+| `HERMES_STATE_DB` | `/root/.hermes/state.db` | Hermes SQLite state database |
+| `ENABLE_HERMES` | `true` | Enable Hermes agent integration |
+
+### Mobile app VPS config
+
+In `.env` or **ARIA Settings → VPS**:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `VPS_BASE_URL` | `http://localhost:8765` | VPS REST base URL |
+| `VPS_WS_URL` | `ws://localhost:8765/ws` | VPS WebSocket URL |
+| `VPS_BEARER_TOKEN` | _(empty)_ | Must match server token |
+| `VPS_DEVICE_ID` | _(auto UUID)_ | Per-device identifier |
+| `GEMINI_LIVE_EPHEMERAL_TOKEN_URL` | _(empty)_ | Point to `http://VPS_HOST:8765/gemini/ephemeral-token` |
+
+### VPS backend tests
+
+```bash
+cd /root/jarvis
+vps/.venv/bin/pytest vps/tests/ -v
+```
+
+16 tests covering health, auth, Hermes trigger, card push, WebSocket protocol.
+
+### Design workflow
+
+See [DESIGN_WORKFLOW.md](DESIGN_WORKFLOW.md) for the open-design integration guide
+covering app screens, Frame HUD cards, admin dashboard, and landing page.

@@ -1,18 +1,22 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/material.dart';
 import 'package:noa/main.dart';
 import 'package:noa/models/app_logic_model.dart' as app;
 import 'package:noa/models/app_mode.dart';
 import 'package:noa/models/gemini_live_config.dart';
+import 'package:noa/models/interpreter_result.dart';
+import 'package:noa/models/interpreter_settings.dart';
 import 'package:noa/models/productivity_model.dart';
 import 'package:noa/models/voice_config.dart';
 import 'package:noa/noa_api.dart';
 import 'package:noa/pages/pairing.dart';
 import 'package:noa/services/gemini_live_service.dart';
 import 'package:noa/services/voice_assistant_service.dart';
+import 'package:noa/services/vps_service.dart';
 import 'package:noa/style.dart';
 import 'package:noa/util/desktop_args.dart';
 import 'package:noa/util/show_toast.dart';
@@ -33,6 +37,8 @@ class _NoaPageState extends ConsumerState<NoaPage> {
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _cmdController = TextEditingController();
   bool _submitting = false;
+  // Subscription for VPS config readiness — closed in dispose().
+  ProviderSubscription<VpsConfig>? _vpsConfigSub;
 
   @override
   void initState() {
@@ -44,10 +50,38 @@ class _NoaPageState extends ConsumerState<NoaPage> {
         (_) => _handleMicTap(),
       );
     }
+    // VPS auto-connect: try immediately (covers case where SharedPreferences
+    // loaded synchronously) and also listen for when the async _load()
+    // completes and the config state transitions from empty → configured.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _tryVpsConnect(ref.read(vpsConfigProvider));
+    });
+    _vpsConfigSub = ref.listenManual<VpsConfig>(
+      vpsConfigProvider,
+      (prev, next) {
+        if (next.enabled && next.isConfigured) _tryVpsConnect(next);
+      },
+    );
+  }
+
+  void _tryVpsConnect(VpsConfig config) {
+    if (!config.enabled || !config.isConfigured) return;
+    final svc = ref.read(vpsServiceProvider);
+    if (svc.isConnected ||
+        svc.connectionState == VpsConnectionState.connecting) {
+      return;
+    }
+    final appModel = ref.read(app.model);
+    svc.connect(
+      config,
+      onCardReceived: (card) => appModel.sendWearableCardToFrame(card),
+      onBannerReceived: (msg) => appModel.sendStatusBannerToFrame(msg),
+    );
   }
 
   @override
   void dispose() {
+    _vpsConfigSub?.close();
     _scrollController.dispose();
     _cmdController.dispose();
     super.dispose();
@@ -90,6 +124,7 @@ class _NoaPageState extends ConsumerState<NoaPage> {
       }
       final appModel = ref.read(app.model);
       final mode = ref.read(appModeProvider);
+      final interpSettings = ref.read(interpreterSettingsProvider);
       await gemini.toggleSession(
         config: geminiConfig,
         systemInstruction: appModel.tunePrompt,
@@ -97,6 +132,9 @@ class _NoaPageState extends ConsumerState<NoaPage> {
         onFrameBanner: (msg) => appModel.sendStatusBannerToFrame(msg),
         onFrameCard: (card) => appModel.sendWearableCardToFrame(card),
         onAddToChat: (u, a) => appModel.addVoiceExchangeToChat(u, a),
+        interpreterSettings: interpSettings,
+        onInterpreterResult: (r) =>
+            ref.read(interpreterResultProvider.notifier).update(r),
       );
       return;
     }
@@ -150,6 +188,8 @@ class _NoaPageState extends ConsumerState<NoaPage> {
 
     // Determine active voice state from whichever service is the primary path.
     final useGemini = ref.watch(geminiLiveConfigProvider).enabled;
+    final interpSettings = ref.watch(interpreterSettingsProvider);
+    final interpResult = ref.watch(interpreterResultProvider);
     final VoiceLoopState voiceState;
     final String? voiceError;
     if (useGemini) {
@@ -296,7 +336,35 @@ class _NoaPageState extends ConsumerState<NoaPage> {
               state: voiceState,
               message: voiceState == VoiceLoopState.error ? voiceError : null,
             ),
-
+          // ── Interpreter result panel ──────────────────────────────
+          if (interpSettings.enabled && (interpResult != null || voiceState != VoiceLoopState.idle))
+            _InterpreterPanel(
+              result: interpResult,
+              isListening: voiceState == VoiceLoopState.listening,
+              settings: interpSettings,
+              onSpeak: () {
+                final r = interpResult;
+                if (r == null) return;
+                final gemini = ref.read(geminiLiveProvider);
+                if (gemini.isActive) {
+                  gemini.sendClientMessage(
+                      'Please speak the translation again: ${r.translation}');
+                } else {
+                  showToast('Start a session to hear translation', context);
+                }
+              },
+              onClear: () =>
+                  ref.read(interpreterResultProvider.notifier).clear(),
+              onSwapDirection: () {
+                final s = ref.read(interpreterSettingsProvider);
+                final next = s.direction == InterpreterDirection.autoToEnglish
+                    ? InterpreterDirection.englishToTarget
+                    : InterpreterDirection.autoToEnglish;
+                ref
+                    .read(interpreterSettingsProvider.notifier)
+                    .update(s.copyWith(direction: next));
+              },
+            ),
           // ── Input bar ────────────────────────────────────────────────────
           Container(
             decoration: const BoxDecoration(
@@ -402,8 +470,7 @@ class _MicButton extends StatelessWidget {
 }
 
 /// Thin banner below the chat list that shows voice loop state.
-class _VoiceStateBanner extends StatelessWidget {
-  final VoiceLoopState state;
+class _VoiceStateBanner extends StatelessWidget {  final VoiceLoopState state;
   final String? message;
 
   const _VoiceStateBanner({required this.state, this.message});
@@ -437,6 +504,204 @@ class _VoiceStateBanner extends StatelessWidget {
           fontFamily: 'SF Pro Display',
         ),
         textAlign: TextAlign.center,
+      ),
+    );
+  }
+}
+// ── Interpreter result panel ───────────────────────────────────────────────────
+
+/// Compact panel shown below the voice banner when Interpreter Mode is active.
+///
+/// Shows the source language, original transcript, translated output,
+/// pronunciation guide, and action buttons (swap, copy, speak, clear).
+class _InterpreterPanel extends StatelessWidget {
+  final InterpreterResult? result;
+  final bool isListening;
+  final InterpreterSettings settings;
+  final VoidCallback onSpeak;
+  final VoidCallback onClear;
+  final VoidCallback onSwapDirection;
+
+  const _InterpreterPanel({
+    required this.result,
+    required this.isListening,
+    required this.settings,
+    required this.onSpeak,
+    required this.onClear,
+    required this.onSwapDirection,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final r = result;
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A2E),
+        border: Border(
+          top: BorderSide(color: colorLight.withOpacity(0.3)),
+          bottom: BorderSide(color: colorLight.withOpacity(0.15)),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Header bar ────────────────────────────────────────────────
+          Container(
+            color: colorDark.withOpacity(0.8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Row(
+              children: [
+                Text(
+                  '🌍 ${settings.direction.displayName}',
+                  style: const TextStyle(
+                      color: colorLight, fontSize: 11, fontFamily: 'SF Pro Display'),
+                ),
+                const Spacer(),
+                if (isListening)
+                  const Text('● interpreting…',
+                      style: TextStyle(
+                          color: Colors.red,
+                          fontSize: 10,
+                          fontFamily: 'SF Pro Display'))
+                else if (r == null)
+                  const Text('tap mic to start',
+                      style: TextStyle(
+                          color: colorLight,
+                          fontSize: 10,
+                          fontFamily: 'SF Pro Display')),
+              ],
+            ),
+          ),
+
+          if (r != null) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Source language badge + original
+                  if (r.sourceLanguage != null)
+                    Text(
+                      r.sourceLanguage!.toUpperCase(),
+                      style: TextStyle(
+                          color: colorLight.withOpacity(0.6),
+                          fontSize: 9,
+                          letterSpacing: 1.2,
+                          fontFamily: 'SF Pro Display'),
+                    ),
+                  if (r.original != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Text(
+                        r.original!,
+                        style: const TextStyle(
+                            color: colorLight,
+                            fontSize: 12,
+                            fontFamily: 'SF Pro Display'),
+                      ),
+                    ),
+
+                  // Translation (large)
+                  Text(
+                    r.translation,
+                    style: const TextStyle(
+                        color: colorWhite,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                        fontFamily: 'SF Pro Display'),
+                  ),
+
+                  // Pronunciation guide
+                  if (settings.showPronunciation &&
+                      r.pronunciation != null &&
+                      r.pronunciation!.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text(
+                        '[${r.pronunciation}]',
+                        style: TextStyle(
+                            color: colorLight.withOpacity(0.7),
+                            fontSize: 11,
+                            fontStyle: FontStyle.italic,
+                            fontFamily: 'SF Pro Display'),
+                      ),
+                    ),
+
+                  // Usage note
+                  if (r.note != null && r.note!.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text(
+                        r.note!,
+                        style: TextStyle(
+                            color: colorLight.withOpacity(0.55),
+                            fontSize: 10,
+                            fontFamily: 'SF Pro Display'),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+
+            // ── Action buttons ─────────────────────────────────────────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+              child: Row(
+                children: [
+                  _PanelButton(
+                      icon: Icons.swap_horiz,
+                      label: 'Swap',
+                      onTap: onSwapDirection),
+                  _PanelButton(
+                    icon: Icons.copy,
+                    label: 'Copy',
+                    onTap: () {
+                      Clipboard.setData(ClipboardData(text: r.translation));
+                      showToast('Copied', context);
+                    },
+                  ),
+                  _PanelButton(
+                      icon: Icons.volume_up,
+                      label: 'Speak',
+                      onTap: onSpeak),
+                  _PanelButton(
+                      icon: Icons.clear,
+                      label: 'Clear',
+                      onTap: onClear),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _PanelButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _PanelButton(
+      {required this.icon, required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Column(
+          children: [
+            Icon(icon, size: 16, color: colorLight),
+            const SizedBox(height: 2),
+            Text(label,
+                style: const TextStyle(
+                    color: colorLight, fontSize: 9, fontFamily: 'SF Pro Display')),
+          ],
+        ),
       ),
     );
   }

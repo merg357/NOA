@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:frame_ble/brilliant_bluetooth.dart';
 import 'package:noa/models/productivity_model.dart';
 import 'package:noa/pages/desktop_splash.dart';
+import 'package:noa/services/vps_service.dart';
 import 'package:noa/pages/splash.dart';
 import 'package:noa/services/window_service.dart';
 import 'package:noa/util/app_log.dart';
@@ -36,6 +37,8 @@ void main() async {
   container.read(appLog);
   // Pre-warm productivity data so it is ready before the user visits Tasks tab.
   container.read(productivityProvider);
+  // Pre-warm VPS config so the service connects early.
+  container.read(vpsConfigProvider);
 
   // ── Mobile-only init (skipped on Windows) ────────────────────────────────
   if (!Platform.isWindows) {

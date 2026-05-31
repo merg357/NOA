@@ -64,6 +64,76 @@ class FrameOutputService {
   ) =>
       sendBanner('Speaking\u2026', sendMessage);
 
+  /// Sends a "Connecting…" status banner to Frame.
+  static Future<void> sendConnectingStatus(
+    Future<void> Function(int flag, List<int> data) sendMessage,
+  ) =>
+      sendBanner('Connecting\u2026', sendMessage);
+
+  /// Sends an "Interrupted" status banner to Frame.
+  static Future<void> sendInterruptedStatus(
+    Future<void> Function(int flag, List<int> data) sendMessage,
+  ) =>
+      sendBanner('Interrupted', sendMessage);
+
+  /// Sends a reminder-confirmed card to Frame.
+  static Future<void> sendReminderCard(
+    String reminderText,
+    Future<void> Function(int flag, List<int> data) sendMessage,
+  ) async {
+    final body =
+        reminderText.length > 140 ? '${reminderText.substring(0, 137)}\u2026' : reminderText;
+    final card = WearableCard(
+      id: 'reminder-${DateTime.now().millisecondsSinceEpoch}',
+      title: 'Reminder saved \u2713',
+      body: body,
+      icon: '\u{F0010}',
+      mode: AppMode.productivity,
+      timestamp: DateTime.now(),
+      cardType: WearableCardType.reminder,
+    );
+    await sendCard(card, sendMessage);
+  }
+
+  /// Sends a Hermes task result card to Frame.
+  static Future<void> sendHermesResultCard(
+    String task,
+    String resultText,
+    Future<void> Function(int flag, List<int> data) sendMessage,
+  ) async {
+    final body =
+        resultText.length > 160 ? '${resultText.substring(0, 157)}\u2026' : resultText;
+    final card = WearableCard(
+      id: 'hermes-${DateTime.now().millisecondsSinceEpoch}',
+      title: '\u25c8 $task',
+      body: body,
+      icon: '\u25c8',
+      mode: AppMode.standard,
+      timestamp: DateTime.now(),
+      cardType: WearableCardType.info,
+    );
+    await sendCard(card, sendMessage);
+  }
+
+  /// Sends a daily brief card to Frame.
+  static Future<void> sendDailyBriefCard(
+    String briefText,
+    Future<void> Function(int flag, List<int> data) sendMessage,
+  ) async {
+    final body =
+        briefText.length > 160 ? '${briefText.substring(0, 157)}\u2026' : briefText;
+    final card = WearableCard(
+      id: 'brief-${DateTime.now().millisecondsSinceEpoch}',
+      title: 'Daily Brief',
+      body: body,
+      icon: '\u{F0000}',
+      mode: AppMode.productivity,
+      timestamp: DateTime.now(),
+      cardType: WearableCardType.dailyBrief,
+    );
+    await sendCard(card, sendMessage);
+  }
+
   /// Sends a compact assistant-reply card to Frame.
   ///
   /// [reply] is truncated automatically by [WearableCard.toFrameString].

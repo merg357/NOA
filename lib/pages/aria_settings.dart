@@ -4,9 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:noa/models/app_logic_model.dart' as app;
 import 'package:noa/models/app_mode.dart';
+import 'package:noa/models/audio_route_state.dart';
 import 'package:noa/models/gemini_live_config.dart';
+import 'package:noa/models/interpreter_settings.dart';
 import 'package:noa/models/productivity_model.dart';
 import 'package:noa/models/voice_config.dart';
+import 'package:noa/services/audio_route_service.dart';
+import 'package:noa/services/vps_service.dart';
 import 'package:noa/services/window_service.dart';
 import 'package:noa/style.dart';
 import 'package:noa/widgets/bottom_nav_bar.dart';
@@ -23,15 +27,39 @@ class AriaSettingsPage extends ConsumerStatefulWidget {
 
 class _AriaSettingsPageState extends ConsumerState<AriaSettingsPage> {
   late final TextEditingController _personaController;
+  late final TextEditingController _vpsBaseUrlController;
+  late final TextEditingController _vpsWsUrlController;
+  late final TextEditingController _vpsTokenController;
   // Desktop window settings — loaded once in initState.
   bool _alwaysOnTop = false;
   bool _borderless = false;
+  // Subscription to update controllers once the async SharedPreferences load
+  // completes (VpsConfigNotifier._load is async, so initState sees empty defaults).
+  ProviderSubscription<VpsConfig>? _vpsConfigSub;
 
   @override
   void initState() {
     super.initState();
     final current = ref.read(app.model).tunePrompt;
     _personaController = TextEditingController(text: current);
+    // Initialise with whatever is already loaded (may still be empty defaults).
+    final vpsCfg = ref.read(vpsConfigProvider);
+    _vpsBaseUrlController = TextEditingController(text: vpsCfg.baseUrl);
+    _vpsWsUrlController = TextEditingController(text: vpsCfg.wsUrl);
+    _vpsTokenController = TextEditingController(text: vpsCfg.bearerToken);
+    // When the async _load() completes the provider notifies; populate any
+    // controllers that were still empty at initState time.
+    _vpsConfigSub = ref.listenManual<VpsConfig>(vpsConfigProvider, (prev, next) {
+      if (_vpsBaseUrlController.text.isEmpty && next.baseUrl.isNotEmpty) {
+        _vpsBaseUrlController.text = next.baseUrl;
+      }
+      if (_vpsWsUrlController.text.isEmpty && next.wsUrl.isNotEmpty) {
+        _vpsWsUrlController.text = next.wsUrl;
+      }
+      if (_vpsTokenController.text.isEmpty && next.bearerToken.isNotEmpty) {
+        _vpsTokenController.text = next.bearerToken;
+      }
+    });
     if (Platform.isWindows) _loadWindowPrefs();
   }
 
@@ -43,7 +71,11 @@ class _AriaSettingsPageState extends ConsumerState<AriaSettingsPage> {
 
   @override
   void dispose() {
+    _vpsConfigSub?.close();
     _personaController.dispose();
+    _vpsBaseUrlController.dispose();
+    _vpsWsUrlController.dispose();
+    _vpsTokenController.dispose();
     super.dispose();
   }
 
@@ -55,6 +87,10 @@ class _AriaSettingsPageState extends ConsumerState<AriaSettingsPage> {
     final voiceConfig = ref.watch(voiceConfigProvider);
     final geminiConfig = ref.watch(geminiLiveConfigProvider);
     final session = ref.watch(conversationSessionProvider);
+    final vpsConfig = ref.watch(vpsConfigProvider);
+    final vpsService = ref.watch(vpsServiceProvider);
+    final interpSettings = ref.watch(interpreterSettingsProvider);
+    final audioRoute = ref.watch(audioRouteServiceProvider);
 
     return Scaffold(
       backgroundColor: colorDark,
@@ -201,6 +237,177 @@ class _AriaSettingsPageState extends ConsumerState<AriaSettingsPage> {
           ),
           const SizedBox(height: 24),
 
+          // ── Interpreter Mode ──────────────────────────────────────────────
+          _sectionHeader('Interpreter Mode'),
+          const SizedBox(height: 8),
+          _ToggleRow(
+            label: 'Enable Interpreter Mode',
+            value: interpSettings.enabled,
+            onChanged: (v) => ref
+                .read(interpreterSettingsProvider.notifier)
+                .update(interpSettings.copyWith(enabled: v)),
+          ),
+          if (interpSettings.enabled) ...[
+            const SizedBox(height: 6),
+            Text('Direction', style: textStyleLight.copyWith(fontSize: 12)),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: InterpreterDirection.values.map((d) {
+                final selected = interpSettings.direction == d;
+                return GestureDetector(
+                  onTap: () => ref
+                      .read(interpreterSettingsProvider.notifier)
+                      .update(interpSettings.copyWith(direction: d)),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? colorLight
+                          : colorLight.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                          color: selected
+                              ? colorWhite
+                              : colorLight.withOpacity(0.4)),
+                    ),
+                    child: Text(
+                      d.displayName,
+                      style: selected
+                          ? textStyleDark.copyWith(
+                              fontWeight: FontWeight.w700)
+                          : textStyleLight,
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+            if (interpSettings.direction !=
+                InterpreterDirection.autoToEnglish) ...[
+              const SizedBox(height: 10),
+              Text('Target language',
+                  style: textStyleLight.copyWith(fontSize: 12)),
+              const SizedBox(height: 6),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                decoration: BoxDecoration(
+                  color: colorLight.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: colorLight.withOpacity(0.4)),
+                ),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    value: interpSettings.targetLanguage,
+                    dropdownColor: colorDark,
+                    style: textStyleLight,
+                    iconEnabledColor: colorLight,
+                    isExpanded: true,
+                    items: InterpreterSettings.supportedLanguages
+                        .map((lang) => DropdownMenuItem(
+                              value: lang,
+                              child: Text(lang, style: textStyleLight),
+                            ))
+                        .toList(),
+                    onChanged: (lang) {
+                      if (lang == null) return;
+                      ref
+                          .read(interpreterSettingsProvider.notifier)
+                          .update(interpSettings.copyWith(
+                              targetLanguage: lang));
+                    },
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 6),
+            _ToggleRow(
+              label: 'Auto-speak translation',
+              value: interpSettings.autoSpeak,
+              onChanged: (v) => ref
+                  .read(interpreterSettingsProvider.notifier)
+                  .update(interpSettings.copyWith(autoSpeak: v)),
+            ),
+            _ToggleRow(
+              label: 'Show pronunciation guide',
+              value: interpSettings.showPronunciation,
+              onChanged: (v) => ref
+                  .read(interpreterSettingsProvider.notifier)
+                  .update(interpSettings.copyWith(showPronunciation: v)),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              interpSettings.direction == InterpreterDirection.autoToEnglish
+                  ? 'Start session → speak in any language → see English translation.'
+                  : interpSettings.direction ==
+                          InterpreterDirection.englishToTarget
+                      ? 'Start session → speak English → see ${interpSettings.targetLanguage} translation.'
+                      : 'Start session → speak either language → auto-translates.',
+              style: textStyleLight.copyWith(fontSize: 11),
+            ),
+          ],
+          const SizedBox(height: 24),
+
+          // ── Earbud Mode ───────────────────────────────────────────────────
+          _sectionHeader('Earbud Mode'),
+          const SizedBox(height: 8),
+          _ToggleRow(
+            label: 'Enable Earbud Mode',
+            value: interpSettings.earbudMode,
+            onChanged: (v) async {
+              ref
+                  .read(interpreterSettingsProvider.notifier)
+                  .update(interpSettings.copyWith(earbudMode: v));
+              final svc = ref.read(audioRouteServiceProvider);
+              if (v) {
+                await svc.selectEarbudIfAvailable();
+              } else {
+                await svc.clearDevice();
+              }
+            },
+          ),
+          const SizedBox(height: 6),
+          Row(children: [
+            _actionButton(
+              label: 'Refresh devices',
+              onTap: () =>
+                  ref.read(audioRouteServiceProvider).refresh(),
+            ),
+          ]),
+          const SizedBox(height: 6),
+          _StatusRow(
+            label: 'Active route',
+            value: audioRoute.state.selected?.name ??
+                'System default',
+            good: audioRoute.state.earbudActive,
+          ),
+          _StatusRow(
+            label: 'Bluetooth available',
+            value: audioRoute.state.earbudAvailable ? '✓' : '✗',
+            good: audioRoute.state.earbudAvailable,
+          ),
+          if (audioRoute.state.available.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text('Available devices:',
+                style: textStyleLight.copyWith(fontSize: 11)),
+            ...audioRoute.state.available.map((d) => Padding(
+                  padding: const EdgeInsets.only(left: 8, top: 2),
+                  child: Text('${d.type.icon} ${d.name}',
+                      style: textStyleLight.copyWith(fontSize: 11)),
+                )),
+          ],
+          if (!Platform.isAndroid) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Earbud mode audio routing requires a real Android device.',
+              style: textStyleLight.copyWith(
+                  fontSize: 10, color: colorLight.withOpacity(0.6)),
+            ),
+          ],
+          const SizedBox(height: 24),
+
           // ── Voice settings (STT/TTS fallback) ─────────────────────────────
           _sectionHeader(
             geminiConfig.enabled
@@ -262,9 +469,131 @@ class _AriaSettingsPageState extends ConsumerState<AriaSettingsPage> {
           ),
           const SizedBox(height: 24),
 
+          // ── VPS backend ───────────────────────────────────────────────────
+          _sectionHeader('VPS Backend'),
+          const SizedBox(height: 8),
+          _ToggleRow(
+            label: 'Enable VPS connection',
+            value: vpsConfig.enabled,
+            onChanged: (v) {
+              final updated = vpsConfig.copyWith(enabled: v);
+              ref.read(vpsConfigProvider.notifier).update(updated);
+              if (v && updated.isConfigured) {
+                ref.read(vpsServiceProvider).connect(
+                  updated,
+                  onCardReceived: (card) =>
+                      appModel.sendWearableCardToFrame(card),
+                  onBannerReceived: (msg) =>
+                      appModel.sendStatusBannerToFrame(msg),
+                );
+              } else if (!v) {
+                ref.read(vpsServiceProvider).disconnect();
+              }
+            },
+          ),
+          const SizedBox(height: 8),
+          _StatusRow(
+            label: 'Connection',
+            value: _vpsStateLabel(vpsService.connectionState),
+            good: vpsService.connectionState == VpsConnectionState.connected,
+          ),
+          _StatusRow(
+            label: 'Device ID',
+            value: vpsConfig.deviceId.isNotEmpty
+                ? vpsConfig.deviceId.substring(0, 8) + '…'
+                : 'auto',
+          ),
+          const SizedBox(height: 8),
+          _inputField(
+            controller: _vpsBaseUrlController,
+            label: 'REST URL (e.g. http://1.2.3.4:8765)',
+            onSubmitted: (v) {
+              final updated = vpsConfig.copyWith(baseUrl: v.trim());
+              ref.read(vpsConfigProvider.notifier).update(updated);
+            },
+          ),
+          const SizedBox(height: 6),
+          _inputField(
+            controller: _vpsWsUrlController,
+            label: 'WebSocket URL (e.g. ws://1.2.3.4:8765/ws)',
+            onSubmitted: (v) {
+              final updated = vpsConfig.copyWith(wsUrl: v.trim());
+              ref.read(vpsConfigProvider.notifier).update(updated);
+            },
+          ),
+          const SizedBox(height: 6),
+          _inputField(
+            controller: _vpsTokenController,
+            label: 'Bearer token',
+            obscure: true,
+            onSubmitted: (v) {
+              final updated = vpsConfig.copyWith(bearerToken: v.trim());
+              ref.read(vpsConfigProvider.notifier).update(updated);
+            },
+          ),
+          const SizedBox(height: 8),
+          Row(children: [
+            _actionButton(
+              label: 'Connect',
+              onTap: () {
+                final updated = vpsConfig.copyWith(
+                  baseUrl: _vpsBaseUrlController.text.trim(),
+                  wsUrl: _vpsWsUrlController.text.trim(),
+                  bearerToken: _vpsTokenController.text.trim(),
+                  enabled: true,
+                );
+                ref.read(vpsConfigProvider.notifier).update(updated);
+                ref.read(vpsServiceProvider).connect(
+                  updated,
+                  onCardReceived: (card) =>
+                      appModel.sendWearableCardToFrame(card),
+                  onBannerReceived: (msg) =>
+                      appModel.sendStatusBannerToFrame(msg),
+                );
+              },
+            ),
+            const SizedBox(width: 8),
+            _actionButton(
+              label: 'Ping Hermes',
+              onTap: () =>
+                  ref.read(vpsServiceProvider).triggerHermesTask('ping'),
+            ),
+            const SizedBox(width: 8),
+            _actionButton(
+              label: 'Daily Brief',
+              onTap: () => ref
+                  .read(vpsServiceProvider)
+                  .triggerHermesTask('daily_brief'),
+            ),
+            const SizedBox(width: 8),
+            _actionButton(
+              label: 'Test Card',
+              onTap: () => ref
+                  .read(vpsServiceProvider)
+                  .triggerHermesTask('test_card'),
+            ),
+          ]),
+          if (vpsService.lastHermesResultText != null) ...[
+            const SizedBox(height: 6),
+            _StatusRow(
+              label: 'Last result',
+              value: vpsService.lastHermesResultText!,
+              good: vpsService.lastHermesResultText!.contains('✓'),
+            ),
+          ],
+          if (vpsService.errorMessage != null &&
+              vpsService.connectionState == VpsConnectionState.error) ...[
+            const SizedBox(height: 6),
+            _StatusRow(
+              label: 'Error',
+              value: vpsService.errorMessage!,
+              good: false,
+            ),
+          ],
+          const SizedBox(height: 24),
+
           // ── Desktop window settings (Windows only) ───────────────────────
-          if (Platform.isWindows) ...[
-            _sectionHeader('Desktop Window'),
+          if (Platform.isWindows) ...[            _sectionHeader('Desktop Window'),
             const SizedBox(height: 8),
             _ToggleRow(
               label: 'Always on top',
@@ -344,6 +673,67 @@ class _AriaSettingsPageState extends ConsumerState<AriaSettingsPage> {
         child: Text(label, style: textStyleRed),
       ),
     );
+  }
+
+  Widget _inputField({
+    required TextEditingController controller,
+    required String label,
+    bool obscure = false,
+    ValueChanged<String>? onSubmitted,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: colorLight,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      child: TextFormField(
+        controller: controller,
+        obscureText: obscure,
+        onFieldSubmitted: onSubmitted,
+        onTapOutside: (_) {
+          onSubmitted?.call(controller.text);
+          FocusScope.of(context).unfocus();
+        },
+        style: textStyleDark.copyWith(fontSize: 13),
+        decoration: InputDecoration.collapsed(
+          hintText: label,
+          hintStyle: textStyleDark.copyWith(
+              color: colorDark.withOpacity(0.5), fontSize: 13),
+        ),
+      ),
+    );
+  }
+
+  Widget _actionButton({
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+        decoration: BoxDecoration(
+          color: colorLight.withOpacity(0.3),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: colorLight.withOpacity(0.5)),
+        ),
+        child: Text(label, style: textStyleLight.copyWith(fontSize: 12)),
+      ),
+    );
+  }
+
+  String _vpsStateLabel(VpsConnectionState s) {
+    switch (s) {
+      case VpsConnectionState.connected:
+        return 'Connected';
+      case VpsConnectionState.connecting:
+        return 'Connecting…';
+      case VpsConnectionState.error:
+        return 'Error';
+      case VpsConnectionState.disconnected:
+        return 'Disconnected';
+    }
   }
 
   String _connectionLabel(app.State s) {

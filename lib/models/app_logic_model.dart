@@ -133,6 +133,10 @@ class AppLogicModel extends ChangeNotifier {
   Future<void> sendWearableCardToFrame(WearableCard card) async {
     currentWearableCard = card;
     notifyListeners();
+    _log.info(
+      '[Card] received: id=${card.id} title="${card.title}"'
+      ' frame=${_connectedDevice != null ? "connected" : "disconnected"}',
+    );
     if (_connectedDevice == null) return;
     try {
       final text = card.toFrameString();
@@ -140,6 +144,7 @@ class AppLogicModel extends ChangeNotifier {
         messageResponseFlag,
         TxRichText(text: text, emoji: "\u{F0003}").pack(),
       );
+      _log.info('[Card] sent to Frame: ${text.length} chars');
     } catch (e) {
       _log.warning("Failed to send wearable card: $e");
     }

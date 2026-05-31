@@ -7,6 +7,8 @@ import 'package:logging/logging.dart';
 import 'package:noa/models/app_mode.dart';
 import 'package:noa/models/conversation_turn.dart';
 import 'package:noa/models/gemini_live_config.dart';
+import 'package:noa/models/interpreter_result.dart';
+import 'package:noa/models/interpreter_settings.dart';
 import 'package:noa/models/wearable_card.dart';
 import 'package:noa/services/audio_playback_service.dart';
 import 'package:noa/services/conversation_session_service.dart';
@@ -87,6 +89,10 @@ class GeminiLiveService extends ChangeNotifier {
   Future<void> Function(String)? _onFrameBanner;
   Future<void> Function(WearableCard)? _onFrameCard;
   void Function(String userText, String modelText)? _onAddToChat;
+  void Function(InterpreterResult)? _onInterpreterResult;
+
+  // Active interpreter settings (null when not in interpreter mode).
+  InterpreterSettings? _interpreterSettings;
 
   // ── Getters ───────────────────────────────────────────────────────────────
 
@@ -132,6 +138,8 @@ class GeminiLiveService extends ChangeNotifier {
     Future<void> Function(String)? onFrameBanner,
     Future<void> Function(WearableCard)? onFrameCard,
     void Function(String userText, String modelText)? onAddToChat,
+    InterpreterSettings? interpreterSettings,
+    void Function(InterpreterResult)? onInterpreterResult,
   }) async {
     if (isActive) {
       _log.warning('[GeminiLive] startSession called while already active');
@@ -141,6 +149,10 @@ class GeminiLiveService extends ChangeNotifier {
     _onFrameBanner = onFrameBanner;
     _onFrameCard = onFrameCard;
     _onAddToChat = onAddToChat;
+    _onInterpreterResult = onInterpreterResult;
+    _interpreterSettings = (interpreterSettings?.enabled == true)
+        ? interpreterSettings
+        : null;
     _pcmBuffer.clear();
     _pendingUserText = null;
     _pendingModelText = null;
@@ -185,7 +197,9 @@ class GeminiLiveService extends ChangeNotifier {
       final basePrompt = systemInstruction.isNotEmpty
           ? systemInstruction
           : 'You are ARIA, a smart wearable AI assistant.';
-      final fullPrompt = basePrompt + mode.systemPromptSuffix;
+      final fullPrompt = (_interpreterSettings != null)
+          ? _interpreterSettings!.buildGeminiInstruction()
+          : basePrompt + mode.systemPromptSuffix;
 
       final setup = {
         'setup': {
@@ -235,6 +249,8 @@ class GeminiLiveService extends ChangeNotifier {
     Future<void> Function(String)? onFrameBanner,
     Future<void> Function(WearableCard)? onFrameCard,
     void Function(String, String)? onAddToChat,
+    InterpreterSettings? interpreterSettings,
+    void Function(InterpreterResult)? onInterpreterResult,
   }) async {
     if (isActive) {
       await stopSession();
@@ -246,6 +262,8 @@ class GeminiLiveService extends ChangeNotifier {
         onFrameBanner: onFrameBanner,
         onFrameCard: onFrameCard,
         onAddToChat: onAddToChat,
+        interpreterSettings: interpreterSettings,
+        onInterpreterResult: onInterpreterResult,
       );
     }
   }
@@ -257,8 +275,32 @@ class GeminiLiveService extends ChangeNotifier {
     await _playback.stop();
     await _closeWebSocket();
     _pcmBuffer.clear();
+    _interpreterSettings = null;
+    _onInterpreterResult = null;
     _setState(GeminiLiveState.idle);
     _onFrameBanner?.call('Session ended');
+  }
+
+  /// Sends a text message to the active Gemini Live session.
+  ///
+  /// Useful for asking Gemini to re-speak a translation when the user taps
+  /// the "Speak" button in the interpreter panel.  No-op if not active.
+  Future<void> sendClientMessage(String text) async {
+    if (_ws == null || !isActive) return;
+    final msg = {
+      'clientContent': {
+        'turns': [
+          {
+            'role': 'user',
+            'parts': [{'text': text}]
+          }
+        ],
+        'turnComplete': true,
+      }
+    };
+    try {
+      _ws!.sink.add(jsonEncode(msg));
+    } catch (_) {}
   }
 
   /// Dismiss an error and return to idle so the mic button becomes tappable.
@@ -382,12 +424,29 @@ class GeminiLiveService extends ChangeNotifier {
         _session.addAssistantTurn(modelText);
         final userText = _pendingUserText ?? '';
         _pendingUserText = null;
-        _onAddToChat?.call(userText, modelText);
 
-        // Send a compact wearable card to Frame.
-        final card = _buildReplyCard(modelText, _session.mode);
-        _session.updateLatestCard(card);
-        _onFrameCard?.call(card);
+        if (_interpreterSettings != null) {
+          // ── Interpreter mode: parse structured output ──────────────────
+          final result = InterpreterResult.tryParse(modelText);
+          if (result != null) {
+            _log.info('[GeminiLive] interpreter result: ${result.sourceLanguage} → ${result.translation}');
+            _onInterpreterResult?.call(result);
+            // Send a compact wearable card with source language + translation.
+            final card = _buildInterpreterCard(result);
+            _session.updateLatestCard(card);
+            _onFrameCard?.call(card);
+          } else {
+            // Gemini responded outside the template (rare) — log and ignore.
+            _log.fine('[GeminiLive] interpreter: could not parse response: $modelText');
+          }
+          // Do NOT add raw structured template text to chat.
+        } else {
+          // ── Normal assistant mode ──────────────────────────────────────
+          _onAddToChat?.call(userText, modelText);
+          final card = _buildReplyCard(modelText, _session.mode);
+          _session.updateLatestCard(card);
+          _onFrameCard?.call(card);
+        }
       }
     }
   }
@@ -526,6 +585,25 @@ class GeminiLiveService extends ChangeNotifier {
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
+  WearableCard _buildInterpreterCard(InterpreterResult result) {
+    final langLabel = result.sourceLanguage ?? '?';
+    final body = result.translation.length > 140
+        ? '${result.translation.substring(0, 137)}…'
+        : result.translation;
+    final pronLine = (result.pronunciation != null && result.pronunciation!.isNotEmpty)
+        ? '\n[${result.pronunciation}]'
+        : '';
+    return WearableCard(
+      id: 'interp-${DateTime.now().millisecondsSinceEpoch}',
+      title: '$langLabel → EN',
+      body: body + pronLine,
+      icon: '🌍',
+      mode: AppMode.standard,
+      timestamp: DateTime.now(),
+      cardType: WearableCardType.info,
+    );
+  }
+
   WearableCard _buildReplyCard(String reply, AppMode mode) {
     final body = reply.length > 160 ? '${reply.substring(0, 157)}…' : reply;
     return WearableCard(
@@ -598,15 +676,15 @@ class GeminiLiveService extends ChangeNotifier {
   void _setError(String msg) {
     _errorMessage = msg;
     _log.warning('[GeminiLive] $msg');
-    _stopMicStream();
-    _closeWebSocket();
+    unawaited(_stopMicStream());
+    unawaited(_closeWebSocket());
     _setState(GeminiLiveState.error);
   }
 
   @override
   void dispose() {
-    _stopMicStream();
-    _closeWebSocket();
+    unawaited(_stopMicStream());
+    unawaited(_closeWebSocket());
     _recorder.dispose();
     _playback.dispose();
     super.dispose();
