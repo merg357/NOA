@@ -1,0 +1,50 @@
+name: botbridge-oauth-metadata-probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.ci/botbridge-oauth-metadata-probe-trigger.md'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe public BotBridge auth metadata
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json, urllib.request, urllib.error
+          urls=[
+            'https://botbridge.scanforlife.net/healthz',
+            'https://botbridge.scanforlife.net/.well-known/oauth-protected-resource/mcp',
+            'https://botbridge.scanforlife.net/.well-known/oauth-authorization-server',
+            'https://botbridge.scanforlife.net/.well-known/openid-configuration',
+          ]
+          for url in urls:
+              print('URL', url)
+              req=urllib.request.Request(url, headers={'User-Agent':'ShiftWorx-recovery-auth-probe/1.0','Accept':'application/json'})
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as r:
+                      body=r.read(10000).decode('utf-8','replace')
+                      print('STATUS', r.status)
+                      print('WWW_AUTH', r.headers.get('WWW-Authenticate',''))
+                      try:
+                          obj=json.loads(body)
+                          # Never print token-like values. Public metadata URLs and capability names are safe.
+                          safe={k:v for k,v in obj.items() if k not in {'client_secret','access_token','refresh_token','token'}}
+                          print('JSON', json.dumps(safe, sort_keys=True)[:8000])
+                      except Exception:
+                          print('BODY', body[:500].replace('\n',' '))
+              except urllib.error.HTTPError as e:
+                  print('STATUS', e.code)
+                  print('WWW_AUTH', e.headers.get('WWW-Authenticate',''))
+                  print('BODY', e.read(1000).decode('utf-8','replace').replace('\n',' '))
+              except Exception as e:
+                  print('ERROR', type(e).__name__, str(e)[:300])
+          PY
